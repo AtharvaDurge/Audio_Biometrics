@@ -1,40 +1,20 @@
-function audio_biometrics_promax()
-%% ========================================================================
-%  AUDIO BIOMETRICS  *PRO MAX*  -  PURE DSP SPEAKER VERIFICATION (NO AI / ML)
-%
-%  Four independent "views" of a voice, fused into one decision:
-%    1. MFCC + CMVN + delta features compared with DTW (Dynamic Time Warping)
-%    2. Formants F1-F3 from LPC (Levinson-Durbin + polynomial roots)
-%    3. Voice quality: pitch F0, jitter, shimmer, HNR (autocorrelation)
-%    4. Spectral shape: centroid, rolloff, flatness, flux, zero-crossing rate
-%
-%  Robustness DSP:  spectral subtraction (noise reduction), RASTA filtering, CMVN
-%
-%  The decision threshold is calibrated automatically from the scores between
-%  your own enrollment samples (z-scores). No training, no learning.
-%
-%  USAGE:  1) enroll 2-5 samples of the SAME phrase   2) record/load a test
-%          3) press VERIFY.     Run:  audio_biometrics_promax   (R2016b+)
-%  ========================================================================
+function audio_biometrics()
 
-    % ---------------- parameters ----------------------------------------
     P.Fs = 16000;   P.frameMs = 25;   P.stepMs = 10;   P.alpha = 0.97;
     P.nFilt = 26;   P.nCoef = 13;     P.NFFT = 512;
-    P.maxSec  = 12;                    % analyse at most 12 s per recording
-    P.denoise = true;                  % spectral subtraction
-    P.rasta   = false;                 % RASTA removes voice colour -> OFF by default
-    P.zThr    = 1.0;                   % accept if fused z <= zThr AND DTW z <= 2*zThr
+    P.maxSec  = 12;
+    P.denoise = true;
+    P.rasta   = false;
+    P.zThr    = 1.0;
     P.fbank   = melFilterBank(P.nFilt, P.NFFT, P.Fs);
     P.dctMat  = dctMatrix(P.nFilt, P.nCoef);
     Fs = P.Fs;
 
-    % ---------------- shared state --------------------------------------
     enr = {};  enrNames = {};  enrSig = {};  model = [];
     testSig = [];  testName = '';
     rec = [];  tmr = [];  recMode = '';  t0 = [];
 
-    % ---------------- main window ---------------------------------------
-    fig = figure('Name', 'Audio Biometrics PRO MAX - Pure DSP', 'NumberTitle', 'off', ...
+    fig = figure('Name', 'Audio Biometrics', 'NumberTitle', 'off', ...
         'MenuBar', 'none', 'ToolBar', 'none', 'Position', [150 30 960 720], ...
         'CloseRequestFcn', @onClose);
 
@@ -72,9 +52,6 @@ function audio_biometrics_promax()
         'TIPS:  same short phrase every time (3 to 5 s), same microphone, quiet room.  Enroll 3 to 5 samples.\n' ...
         'Noise reduction / RASTA checkboxes switch those DSP blocks on or off (enrollment is re-analysed).']));
 
-    % ====================================================================
-    %                        UI HELPERS / CALLBACKS
-    % ====================================================================
     function b = mkBtn(label, pos, cb)
         b = uicontrol(fig, 'Style', 'pushbutton', 'String', label, ...
             'FontSize', 11, 'Position', pos, 'Callback', cb);
@@ -96,7 +73,7 @@ function audio_biometrics_promax()
         recMode = m;
         try
             rec = audiorecorder(Fs, 16, 1);
-            record(rec);                               % <- recording starts here
+            record(rec);
         catch ME
             errordlg(['Cannot access the microphone: ' ME.message ...
                 '  Use the Load buttons instead.'], 'Microphone error');
@@ -180,7 +157,7 @@ function audio_biometrics_promax()
         catch ME
             errordlg(ME.message, 'Enrollment error'); refreshStatus(); return;
         end
-        enr{end+1} = A;  enrNames{end+1} = name;  enrSig{end+1} = x(:); %#ok<AGROW>
+        enr{end+1} = A;  enrNames{end+1} = name;  enrSig{end+1} = x(:);
         showWave(x, sprintf('Enrollment sample "%s" captured (%.1f s)', name, numel(x)/Fs), [0 0.55 0]);
         refreshModel();  refreshStatus();
     end
@@ -197,7 +174,7 @@ function audio_biometrics_promax()
         if ~isempty(enrSig)
             set(txtEnr, 'String', 'Re-analysing enrollment with new settings ...'); drawnow;
             for i = 1:numel(enrSig)
-                try, enr{i} = analyzeVoice(enrSig{i}, P); catch, end %#ok<NOCOM>
+                try, enr{i} = analyzeVoice(enrSig{i}, P); catch, end
             end
             refreshModel();  refreshStatus();
         end
@@ -244,9 +221,6 @@ function audio_biometrics_promax()
         end
     end
 
-    % ====================================================================
-    %                               VERIFY
-    % ====================================================================
     function verify()
         if numel(enr) < 2 || isempty(model)
             warndlg('Provide at least 2 enrollment samples first.'); return;
@@ -265,10 +239,10 @@ function audio_biometrics_promax()
         conf = 100 / (1 + exp(2.5*(sc.fused - P.zThr)));
         if ok
             set(txtResult, 'ForegroundColor', [0 0.5 0], 'String', ...
-                sprintf('ACCESS GRANTED  -  same speaker   (fused z = %.2f, DTW z = %.2f)', sc.fused, sc.z(1)));
+                sprintf('MATCH  -  same speaker   (fused z = %.2f, DTW z = %.2f)', sc.fused, sc.z(1)));
         else
             set(txtResult, 'ForegroundColor', [0.8 0 0], 'String', ...
-                sprintf('ACCESS DENIED  -  different speaker   (fused z = %.2f, DTW z = %.2f)', sc.fused, sc.z(1)));
+                sprintf('NO MATCH  -  different speaker   (fused z = %.2f, DTW z = %.2f)', sc.fused, sc.z(1)));
         end
 
         names = {'DTW-MFCC', 'Formants', 'Voice quality', 'Spectral'};
@@ -287,9 +261,6 @@ function audio_biometrics_promax()
         showDashboard(A, sc, ok, conf);
     end
 
-    % ====================================================================
-    %                       DASHBOARD (9 panels)
-    % ====================================================================
     function showDashboard(A, sc, ok, conf)
         f2 = figure(901); clf(f2);
         set(f2, 'Name', 'Verification Dashboard', 'NumberTitle', 'off', 'Position', [40 30 1380 820]);
@@ -355,7 +326,7 @@ function audio_biometrics_promax()
         subplot(3,3,9);
         cla; axis([0 1 0 1]); axis off;
         rectangle('Position', [0 0 1 1], 'FaceColor', ternaryC(ok), 'EdgeColor', 'none');
-        if ok, vtxt = 'ACCESS GRANTED'; else, vtxt = 'ACCESS DENIED'; end
+        if ok, vtxt = 'MATCH'; else, vtxt = 'NO MATCH'; end
         text(0.5, 0.82, vtxt, 'Color', 'w', 'FontSize', 20, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
         text(0.5, 0.62, sprintf('Fused z = %.2f   (threshold %.1f)', sc.fused, P.zThr), 'Color', 'w', 'FontSize', 13, 'HorizontalAlignment', 'center');
         text(0.5, 0.46, sprintf('Confidence (heuristic): %.0f %%', conf), 'Color', 'w', 'FontSize', 13, 'HorizontalAlignment', 'center');
@@ -373,17 +344,11 @@ function audio_biometrics_promax()
     end
 end
 
-
-%% ========================================================================
-%                          DSP CORE (local functions)
-%  ========================================================================
-
 function out = ternary(c, a, b)
     if c, out = a; else, out = b; end
 end
 
 function ok = isMatch(sc, P)
-% Accept only if the fused score passes AND the DTW score passes on its own
     ok = sc.fused <= P.zThr && sc.z(1) <= 2 * P.zThr;
 end
 
@@ -391,40 +356,38 @@ function c = ternaryC(ok)
     if ok, c = [0.10 0.60 0.20]; else, c = [0.78 0.12 0.12]; end
 end
 
-%% ---------------------- full analysis of one recording ------------------
 function A = analyzeVoice(x, P)
     x = x(:);
     x = x(1 : min(numel(x), round(P.maxSec * P.Fs)));
-    x = x - mean(x);                                       % DC removal
+    x = x - mean(x);
     if max(abs(x)) < 1e-4
         error('The recording is silent. Check microphone / file.');
     end
-    x = x / (max(abs(x)) + eps);                           % normalization
+    x = x / (max(abs(x)) + eps);
     if P.denoise
-        x = spectralSubtract(x, P.Fs);                     % noise reduction
+        x = spectralSubtract(x, P.Fs);
         x = x / (max(abs(x)) + eps);
     end
-    y = [x(1); x(2:end) - P.alpha * x(1:end-1)];           % pre-emphasis
+    y = [x(1); x(2:end) - P.alpha * x(1:end-1)];
 
-    frameLen = round(P.Fs * P.frameMs / 1000);             % 400 samples
-    stepLen  = round(P.Fs * P.stepMs  / 1000);             % 160 samples
+    frameLen = round(P.Fs * P.frameMs / 1000);
+    stepLen  = round(P.Fs * P.stepMs  / 1000);
     nF = 1 + floor((numel(y) - frameLen) / stepLen);
     if nF < 30, error('Recording too short (need about 0.5 s or more).'); end
 
-    idx = (1:frameLen)' + (0:nF-1) * stepLen;              % framing
-    w   = 0.54 - 0.46 * cos(2*pi*(0:frameLen-1)' / (frameLen-1));   % Hamming
+    idx = (1:frameLen)' + (0:nF-1) * stepLen;
+    w   = 0.54 - 0.46 * cos(2*pi*(0:frameLen-1)' / (frameLen-1));
     Yw  = y(idx) .* w;
 
     X  = fft(Yw, P.NFFT);
-    Pw = abs(X(1:P.NFFT/2+1, :)).^2;                       % power spectrum
-    E  = max(P.fbank * Pw, eps);                           % Mel energies
+    Pw = abs(X(1:P.NFFT/2+1, :)).^2;
+    E  = max(P.fbank * Pw, eps);
     LE = log(E);
-    if P.rasta                                             % RASTA band-pass over time
+    if P.rasta
         LE = filter(0.1*[2 1 0 -1 -2], [1 -0.98], LE, [], 2);
     end
-    C = P.dctMat * LE;                                     % DCT -> MFCC
+    C = P.dctMat * LE;
 
-    % ---- voice activity detection --------------------------------------
     eDB = 10*log10(sum(Yw.^2, 1)' + eps);
     s = sort(eDB);
     noiseFloor = s(max(1, round(0.1*nF)));
@@ -434,9 +397,8 @@ function A = analyzeVoice(x, P)
     if sum(vad) < 30, vad = eDB >= median(eDB); end
     if sum(vad) < 30, error('Not enough speech detected.'); end
 
-    % ---- view 1: MFCC + CMVN + deltas ----------------------------------
-    M = C(2:end, vad)';          % c1..c12 (c0 dropped); NO mean removal -> keeps voice colour
-    A.F = [M deltaCalc(M, 2)];                             % 24 features / frame
+    M = C(2:end, vad)';
+    A.F = [M deltaCalc(M, 2)];
     A.M = M;
 
     A.x = x;  A.vad = vad;
@@ -445,17 +407,15 @@ function A = analyzeVoice(x, P)
     A.Sdb = 10*log10(Pw + eps);
     A.ltas = mean(A.Sdb(:, vad), 2);
 
-    % ---- view 2: formants by LPC ---------------------------------------
     A.formTrack = formantTrack(Yw, vad, P);
     okF = all(~isnan(A.formTrack), 2);
     if sum(okF) >= 5
         FT = A.formTrack(okF, :);
-        A.form = [median(FT, 1), std(FT, 0, 1)];           % 1x6
+        A.form = [median(FT, 1), std(FT, 0, 1)];
     else
         A.form = nan(1, 6);
     end
 
-    % ---- view 3: pitch, jitter, shimmer, HNR ---------------------------
     [A.f0track, pk, amp, per] = pitchTrack(x, P, nF, stepLen, vad);
     voiced = ~isnan(A.f0track);
     if sum(voiced) >= 5
@@ -466,12 +426,11 @@ function A = analyzeVoice(x, P)
         if numel(dA) >= 3, shi = mean(dA) / mean(amp(voiced)); else, shi = NaN; end
         pkc = min(pk(voiced), 0.999);
         hnr = mean(10*log10(pkc ./ (1 - pkc)));
-        A.voice = [f0med, jit, shi, hnr + 20];             % +20 keeps it positive
+        A.voice = [f0med, jit, shi, hnr + 20];
     else
         A.voice = nan(1, 4);
     end
 
-    % ---- view 4: spectral shape features -------------------------------
     Pk = Pw(:, vad);
     f  = A.freqs(:);
     cent = (f' * Pk) ./ (sum(Pk, 1) + eps);
@@ -486,28 +445,26 @@ function A = analyzeVoice(x, P)
     A.spec = [mean(cent), mean(roll), mean(flat), mean(flux), mean(zcr), std(cent), std(roll)];
 end
 
-%% ---------------------- spectral subtraction (noise reduction) ----------
-function y = spectralSubtract(x, Fs) %#ok<INUSD>
+function y = spectralSubtract(x, Fs)
     x = x(:);  L = numel(x);
     N = 512;  H = 256;
     nFr = max(1, ceil((L - N) / H) + 1);
     Lp  = (nFr - 1) * H + N;
     xp  = [x; zeros(Lp - L, 1)];
-    w   = sin(pi * ((0:N-1)' + 0.5) / N);                  % sine window (PR at 50% overlap)
+    w   = sin(pi * ((0:N-1)' + 0.5) / N);
     idx = (1:N)' + (0:nFr-1) * H;
     X    = fft(xp(idx) .* w);
     mag2 = abs(X).^2;   ph = angle(X);
-    [~, ord] = sort(sum(mag2, 1));                         % quietest frames = noise
+    [~, ord] = sort(sum(mag2, 1));
     nn = ord(1 : min(nFr, max(3, round(0.1*nFr))));
-    Nm = mean(mag2(:, nn), 2);                             % noise power estimate
-    G2 = max(mag2 - 2*Nm, 0.02*mag2);                      % over-subtraction + floor
+    Nm = mean(mag2(:, nn), 2);
+    G2 = max(mag2 - 2*Nm, 0.02*mag2);
     Y  = sqrt(G2) .* exp(1j*ph);
     fr = real(ifft(Y)) .* w;
-    y  = accumarray(idx(:), fr(:), [Lp 1]);                % overlap-add
+    y  = accumarray(idx(:), fr(:), [Lp 1]);
     y  = y(1:L);
 end
 
-%% ---------------------- delta (time derivative) -------------------------
 function D = deltaCalc(M, N)
     T = size(M, 1);
     Mp = [repmat(M(1,:), N, 1); M; repmat(M(end,:), N, 1)];
@@ -518,7 +475,6 @@ function D = deltaCalc(M, N)
     D = D / (2 * sum((1:N).^2));
 end
 
-%% ---------------------- pitch by autocorrelation ------------------------
 function [f0, pk, amp, per] = pitchTrack(x, P, nF, stepLen, vad)
     pl = round(0.04 * P.Fs);
     f0 = nan(nF, 1);  pk = f0;  amp = f0;  per = f0;
@@ -534,7 +490,7 @@ function [f0, pk, amp, per] = pitchTrack(x, P, nF, stepLen, vad)
         r = r(1:pl) / r(1);
         [p1, ii] = max(r(lagMin+1 : lagMax+1));
         L = lagMin + ii - 1;
-        Lh = round(L/2);                                   % avoid octave (double-period) errors
+        Lh = round(L/2);
         if Lh >= lagMin + 2
             [p2, i2] = max(r(Lh-1 : Lh+3));
             if p2 > 0.85 * p1, L = Lh - 3 + i2;  p1 = p2; end
@@ -542,18 +498,17 @@ function [f0, pk, amp, per] = pitchTrack(x, P, nF, stepLen, vad)
         if p1 > 0.35
             r0 = r(L+1);  rm = r(L);  rp = r(L+2);
             den = rm - 2*r0 + rp;  d = 0;
-            if den < 0, d = max(-1, min(1, 0.5*(rm - rp)/den)); end   % parabolic interpolation
+            if den < 0, d = max(-1, min(1, 0.5*(rm - rp)/den)); end
             Lr = L + d;
             f0(k) = P.Fs / Lr;  per(k) = Lr;  pk(k) = p1;  amp(k) = sqrt(mean(seg.^2));
         end
     end
 end
 
-%% ---------------------- formants via LPC --------------------------------
 function form = formantTrack(Yw, vad, P)
     nF = size(Yw, 2);
     form = nan(nF, 3);
-    p = 16;                                                % LPC order
+    p = 16;
     R = real(ifft(abs(fft(Yw(:, vad), 1024)).^2));
     R = R(1:p+1, :);
     kidx = find(vad);
@@ -574,7 +529,6 @@ function form = formantTrack(Yw, vad, P)
 end
 
 function a = levinson(r, p)
-% Levinson-Durbin recursion: autocorrelation -> LPC polynomial [1 a1 ... ap]
     a = zeros(1, p+1);  a(1) = 1;  e = r(1);
     for i = 1:p
         acc = r(i+1);
@@ -588,7 +542,6 @@ function a = levinson(r, p)
     end
 end
 
-%% ---------------------- DTW ---------------------------------------------
 function [d, Dm, path] = dtwDist(A, B)
     A = A(1:2:end, :);  B = B(1:2:end, :);
     n = size(A, 1);  m = size(B, 1);
@@ -612,14 +565,12 @@ function [d, Dm, path] = dtwDist(A, B)
                 [~, k] = min([Acc(i, j), Acc(i, j+1), Acc(i+1, j)]);
                 if k == 1, i = i-1; j = j-1; elseif k == 2, i = i-1; else, j = j-1; end
             end
-            path(end+1, :) = [i j]; %#ok<AGROW>
+            path(end+1, :) = [i j];
         end
     end
 end
 
-%% ---------------------- scoring / fusion / calibration ------------------
 function d = relDist(a, b)
-% scale-free distance between two feature vectors (NaN-safe)
     v = ~isnan(a) & ~isnan(b);
     if ~any(v), d = NaN; return; end
     r = abs(a(v) - b(v)) ./ ((abs(a(v)) + abs(b(v)))/2 + 1e-6);
@@ -630,20 +581,18 @@ function d = featureDistances(A, B)
     d = [dtwDist(A.F, B.F), relDist(A.form, B.form), relDist(A.voice, B.voice), relDist(A.spec, B.spec)];
 end
 
-function model = buildModel(enr, P) %#ok<INUSD>
-% Learn nothing: just measure how much the speaker's OWN samples differ
+function model = buildModel(enr, P)
     n = numel(enr);  pairD = [];
     for i = 1:n-1
         for j = i+1:n
-            pairD(end+1, :) = featureDistances(enr{i}, enr{j}); %#ok<AGROW>
+            pairD(end+1, :) = featureDistances(enr{i}, enr{j});
         end
     end
     mu = mean(pairD, 1);
     if size(pairD, 1) > 1, sd = std(pairD, 0, 1); else, sd = zeros(1, 4); end
-    % spread is kept between 6% and 15% of the mean: sloppy enrollment cannot loosen the threshold
     sdEff = min(max(sd, 0.06 * abs(mu)), 0.15 * abs(mu));
     sdEff(sdEff < 1e-6 | isnan(sdEff)) = 1e-6;
-    w = [0.55 0.15 0.15 0.15];                             % fusion weights
+    w = [0.55 0.15 0.15 0.15];
     bad = any(isnan(pairD), 1);
     w(bad) = 0;  mu(bad) = 0;
     model.pairD = pairD;  model.mu = mu;  model.sd = sdEff;  model.w = w;
@@ -662,7 +611,6 @@ function sc = scoreTest(A, model, enr)
     [~, sc.best] = min(D(:, 1));
 end
 
-%% ---------------------- Mel filter bank & DCT ---------------------------
 function fb = melFilterBank(numFilters, NFFT, fs)
     hz2mel = @(f) 2595 * log10(1 + f/700);
     mel2hz = @(m) 700 * (10.^(m/2595) - 1);
@@ -687,7 +635,6 @@ function D = dctMatrix(N, K)
     D(1,:) = D(1,:) / sqrt(2);
 end
 
-%% ---------------------- audio input helpers -----------------------------
 function sig = loadAudio(fname, Fs_target)
     if ~isfile(fname), error('File not found: %s', fname); end
     try
