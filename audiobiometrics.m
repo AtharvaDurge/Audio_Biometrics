@@ -9,10 +9,6 @@ function audio_biometrics_promax()
 %    4. Spectral shape: centroid, rolloff, flatness, flux, zero-crossing rate
 %
 %  Robustness DSP:  spectral subtraction (noise reduction), RASTA filtering, CMVN
-%  Extras:
-%     * Noise Stress Test   - accuracy vs SNR (adds white noise at 40..0 dB)
-%     * Voice-Changer Attack - phase-vocoder pitch shifting to fool the system
-%     * Live Mode           - real-time spectrogram, formants, pitch, match score
 %
 %  The decision threshold is calibrated automatically from the scores between
 %  your own enrollment samples (z-scores). No training, no learning.
@@ -36,8 +32,6 @@ function audio_biometrics_promax()
     enr = {};  enrNames = {};  enrSig = {};  model = [];
     testSig = [];  testName = '';
     rec = [];  tmr = [];  recMode = '';  t0 = [];
-    liveRec = [];  liveTmr = [];  figLive = [];  liveHist = [];
-    axL1 = []; axL2 = []; axL3 = []; axL4 = [];
 
     % ---------------- main window ---------------------------------------
     fig = figure('Name', 'Audio Biometrics PRO MAX - Pure DSP', 'NumberTitle', 'off', ...
@@ -57,14 +51,10 @@ function audio_biometrics_promax()
 
     btnLoadEnr  = mkBtn('Load Enrollment File(s)', [60  410 195 38], @(~,~) loadEnroll());
     btnLoadTest = mkBtn('Load Test File',          [270 410 195 38], @(~,~) loadTest());
-    btnLive     = mkBtn('Live Mode',               [480 410 195 38], @(~,~) toggleLive());
-
-    btnStress = mkBtn('Noise Stress Test',   [60  360 195 38], @(~,~) stressTest());
-    btnAttack = mkBtn('Voice-Changer Attack', [270 360 195 38], @(~,~) attackDemo());
     chkDen = uicontrol(fig, 'Style', 'checkbox', 'String', 'Noise reduction', 'Value', 1, ...
-        'FontSize', 11, 'Position', [490 365 190 28], 'Callback', @(~,~) onOpt());
+        'FontSize', 11, 'Position', [490 415 190 28], 'Callback', @(~,~) onOpt());
     chkRasta = uicontrol(fig, 'Style', 'checkbox', 'String', 'RASTA filter', 'Value', 0, ...
-        'FontSize', 11, 'Position', [700 365 190 28], 'Callback', @(~,~) onOpt());
+        'FontSize', 11, 'Position', [700 415 190 28], 'Callback', @(~,~) onOpt());
 
     txtEnr  = mkTxt([60 325 840 24], 'Enrollment: none yet (record / load 2 to 5 samples of the SAME phrase)');
     txtTest = mkTxt([60 300 840 24], 'Test voice: not provided yet');
@@ -80,9 +70,6 @@ function audio_biometrics_promax()
     uicontrol(fig, 'Style', 'text', 'FontSize', 10, 'HorizontalAlignment', 'left', ...
         'Position', [60 10 840 115], 'String', sprintf([ ...
         'TIPS:  same short phrase every time (3 to 5 s), same microphone, quiet room.  Enroll 3 to 5 samples.\n' ...
-        'Noise Stress Test: adds noise to your TEST voice (40 to 0 dB SNR) and plots the score.\n' ...
-        'Voice-Changer Attack: load an IMPOSTOR as the test voice; pitch-shifts it to try to fool the system.\n' ...
-        'Live Mode: speak into the mic and watch spectrogram, formants, pitch and a live match score.\n' ...
         'Noise reduction / RASTA checkboxes switch those DSP blocks on or off (enrollment is re-analysed).']));
 
     % ====================================================================
@@ -101,12 +88,11 @@ function audio_biometrics_promax()
     function setIdle(isIdle)
         s = 'off'; if isIdle, s = 'on'; end
         set([btnRecEnr btnRecTest btnLoadEnr btnLoadTest btnVerify btnReset ...
-             btnStress btnAttack btnLive chkDen chkRasta], 'Enable', s);
+             chkDen chkRasta], 'Enable', s);
         if isIdle, set(btnStop, 'Enable', 'off'); else, set(btnStop, 'Enable', 'on'); end
     end
 
     function startRec(m)
-        if ~isempty(liveTmr), warndlg('Stop Live Mode first.'); return; end
         recMode = m;
         try
             rec = audiorecorder(Fs, 16, 1);
@@ -377,203 +363,12 @@ function audio_biometrics_promax()
         text(0.5, 0.14, sprintf('jitter %.3f  shimmer %.3f  HNR %.1f dB', A.voice(2), A.voice(3), A.voice(4)-20), 'Color', 'w', 'FontSize', 10, 'HorizontalAlignment', 'center');
     end
 
-    % ====================================================================
-    %                     NOISE STRESS TEST (accuracy vs SNR)
-    % ====================================================================
-    function stressTest()
-        if isempty(model), warndlg('Enroll at least 2 samples first.'); return; end
-        if isempty(testSig), warndlg('Provide a test voice first (use a GENUINE one for best demo).'); return; end
-        set(txtResult, 'String', 'Running noise stress test ...', 'ForegroundColor', 'k'); drawnow;
-        snrs = [40 30 20 15 10 5 0];
-        x0 = testSig(1:min(numel(testSig), round(P.maxSec*Fs)));
-        x0 = x0 - mean(x0);
-        sigPow = mean(x0.^2);
-        fusedV = nan(size(snrs));  zV = nan(numel(snrs), 4);  okV = false(size(snrs));
-        rng(7);
-        for q = 1:numel(snrs)
-            nz = randn(size(x0)) * sqrt(sigPow / 10^(snrs(q)/10));
-            try
-                sc = scoreTest(analyzeVoice(x0 + nz, P), model, enr);
-                fusedV(q) = sc.fused;  zV(q,:) = sc.z;  okV(q) = isMatch(sc, P);
-            catch
-            end
-        end
-        f3 = figure(902); clf(f3);
-        set(f3, 'Name', 'Noise Stress Test', 'NumberTitle', 'off', 'Position', [100 80 1200 700]);
-        colormap(f3, 'jet');
-        subplot(2,2,1);
-        plot(snrs, fusedV, 'k-', 'LineWidth', 1.5); hold on;
-        okp = okV;
-        plot(snrs(okp),  fusedV(okp),  'go', 'MarkerFaceColor', 'g', 'MarkerSize', 9);
-        plot(snrs(~okp), fusedV(~okp), 'ro', 'MarkerFaceColor', 'r', 'MarkerSize', 9);
-        plot([-2 42], [P.zThr P.zThr], 'k--', 'LineWidth', 2);
-        set(gca, 'XDir', 'reverse'); grid on; xlabel('SNR (dB)  -  noisier to the right'); ylabel('Fused z-score');
-        title('Verification score vs noise (green = accepted, red = rejected)');
-        subplot(2,2,2);
-        plot(snrs, zV, '-o', 'LineWidth', 1.5); set(gca, 'XDir', 'reverse'); grid on;
-        legend('DTW-MFCC', 'Formants', 'Voice quality', 'Spectral', 'Location', 'best');
-        xlabel('SNR (dB)'); ylabel('z-score'); title('Which features suffer from noise?');
-        x5 = x0 + randn(size(x0)) * sqrt(sigPow / 10^(0.5));
-        [S1, tt, ff] = quickSpec(x5, Fs);
-        S2 = quickSpec(spectralSubtract(x5, Fs), Fs);
-        subplot(2,2,3); imagesc(tt, ff, S1); axis xy; caxis([max(S1(:))-70 max(S1(:))]);
-        xlabel('Time (s)'); ylabel('Hz'); title('Spectrogram: noisy test voice (5 dB SNR)');
-        subplot(2,2,4); imagesc(tt, ff, S2); axis xy; caxis([max(S1(:))-70 max(S1(:))]);
-        xlabel('Time (s)'); ylabel('Hz'); title('After spectral subtraction (noise reduction)');
-        fprintf('\n======== NOISE STRESS TEST ========\n');
-        for q = 1:numel(snrs)
-            fprintf('SNR %2d dB : fused z = %6.2f  -> %s\n', snrs(q), fusedV(q), ternary(okV(q), 'accepted', 'rejected'));
-        end
-        fprintf('===================================\n');
-        set(txtResult, 'String', 'Noise stress test finished (see figure)', 'ForegroundColor', 'k');
-    end
-
-    % ====================================================================
-    %                  VOICE-CHANGER ATTACK (phase vocoder)
-    % ====================================================================
-    function attackDemo()
-        if isempty(model), warndlg('Enroll at least 2 samples first.'); return; end
-        if isempty(testSig), warndlg('Load an IMPOSTOR voice as the test voice first.'); return; end
-        set(txtResult, 'String', 'Running voice-changer attack (pitch shifting) ...', 'ForegroundColor', 'k'); drawnow;
-        semis = -8:1:8;
-        x0 = testSig(1:min(numel(testSig), round(P.maxSec*Fs)));
-        fusedV = nan(size(semis));  f0V = nan(size(semis));  okV = false(size(semis));
-        for q = 1:numel(semis)
-            try
-                y = pitchShift(x0, 2^(semis(q)/12));
-                Aq = analyzeVoice(y, P);
-                sc = scoreTest(Aq, model, enr);
-                fusedV(q) = sc.fused;  f0V(q) = Aq.voice(1);  okV(q) = isMatch(sc, P);
-            catch
-            end
-        end
-        tmpV = fusedV;  if any(okV), tmpV(~okV) = inf; end
-        [bestZ, bi] = min(tmpV);
-        v = cellfun(@(e) e.voice(1), enr);  f0e = median(v(~isnan(v)));
-
-        f4 = figure(903); clf(f4);
-        set(f4, 'Name', 'Voice-Changer Attack', 'NumberTitle', 'off', 'Position', [100 100 1300 420]);
-        colormap(f4, 'jet');
-        subplot(1,3,1);
-        plot(semis, fusedV, 'k-', 'LineWidth', 1.5); hold on;
-        okp = okV;
-        plot(semis(okp),  fusedV(okp),  'go', 'MarkerFaceColor', 'g', 'MarkerSize', 9);
-        plot(semis(~okp), fusedV(~okp), 'ro', 'MarkerFaceColor', 'r', 'MarkerSize', 9);
-        plot([-9 9], [P.zThr P.zThr], 'k--', 'LineWidth', 2); grid on;
-        xlabel('Pitch shift applied (semitones)'); ylabel('Fused z-score');
-        title('Attack: fused score vs pitch shift (green = fooled the system)');
-        subplot(1,3,2);
-        plot(semis, f0V, 'b-o', 'LineWidth', 1.5); hold on;
-        if ~isnan(f0e), plot([-9 9], [f0e f0e], 'r--', 'LineWidth', 2); end
-        grid on; xlabel('Pitch shift (semitones)'); ylabel('Attacker F0 (Hz)');
-        title('Attacker pitch vs enrolled speaker pitch (red)');
-        subplot(1,3,3);
-        if ~isnan(bestZ)
-            yb = pitchShift(x0, 2^(semis(bi)/12));
-            [Sb, tb, fb] = quickSpec(yb, Fs);
-            imagesc(tb, fb, Sb); axis xy; caxis([max(Sb(:))-70 max(Sb(:))]);
-            xlabel('Time (s)'); ylabel('Hz');
-            title(sprintf('Best attack spectrogram (%+d semitones)', semis(bi)));
-        end
-        fprintf('\n======== VOICE-CHANGER ATTACK ========\n');
-        if any(okV)
-            fprintf('ATTACK SUCCEEDED: shift %+d semitones gives fused z = %.2f <= %.1f\n', semis(bi), bestZ, P.zThr);
-            msg = sprintf('Attack SUCCEEDED at %+d semitones (z = %.2f)', semis(bi), bestZ);
-        else
-            fprintf('System RESISTED the attack: best fused z = %.2f > %.1f\n', bestZ, P.zThr);
-            msg = sprintf('System RESISTED the attack (best z = %.2f > %.1f)', bestZ, P.zThr);
-        end
-        fprintf('======================================\n');
-        set(txtResult, 'String', msg, 'ForegroundColor', 'k');
-    end
-
-    % ====================================================================
-    %                  LIVE MODE (real-time analysis)
-    % ====================================================================
-    function toggleLive()
-        if ~isempty(liveTmr), stopLive(false); return; end
-        if ~isempty(rec), warndlg('Finish the current recording first.'); return; end
-        try
-            liveRec = audiorecorder(Fs, 16, 1);
-            record(liveRec, 600);
-        catch ME
-            errordlg(['Cannot access the microphone: ' ME.message], 'Microphone error');
-            liveRec = [];  return;
-        end
-        figLive = figure(904); clf(figLive);
-        set(figLive, 'Name', 'LIVE MODE', 'NumberTitle', 'off', 'Position', [120 60 1250 750], ...
-            'CloseRequestFcn', @(~,~) stopLive(true));
-        colormap(figLive, 'jet');
-        axL1 = subplot(2,2,1);  axL2 = subplot(2,2,2);
-        axL3 = subplot(2,2,3);  axL4 = subplot(2,2,4);
-        liveHist = [];
-        liveTmr = timer('ExecutionMode', 'fixedSpacing', 'Period', 0.6, 'BusyMode', 'drop', ...
-                        'TimerFcn', @(~,~) liveTick());
-        start(liveTmr);
-        set(btnLive, 'String', 'Stop Live');
-    end
-
-    function stopLive(closeFig)
-        try, stop(liveTmr); delete(liveTmr); catch, end %#ok<NOCOM>
-        liveTmr = [];
-        try, stop(liveRec); catch, end %#ok<NOCOM>
-        liveRec = [];
-        try, set(btnLive, 'String', 'Live Mode'); catch, end %#ok<NOCOM>
-        if closeFig
-            try, delete(figLive); catch, end %#ok<NOCOM>
-        end
-    end
-
-    function liveTick()
-        if isempty(liveRec) || isempty(figLive) || ~ishandle(figLive), return; end
-        x = getaudiodata(liveRec);
-        if numel(x) < Fs, return; end
-        seg = x(max(1, end-3*Fs+1):end);
-        tt = (0:numel(seg)-1)/Fs;
-        cla(axL1); plot(axL1, tt, seg, 'b'); grid(axL1, 'on');
-        ylim(axL1, [-max(0.05, 1.1*max(abs(seg))), max(0.05, 1.1*max(abs(seg)))]);
-        xlabel(axL1, 'Time (s)'); title(axL1, 'Live waveform (last 3 s)');
-        if sqrt(mean(seg.^2)) < 0.004
-            title(axL2, 'listening ... (speak!)'); drawnow limitrate; return;
-        end
-        try
-            A = analyzeVoice(seg, P);
-        catch
-            title(axL2, 'listening ... (speak!)'); drawnow limitrate; return;
-        end
-        cla(axL2); imagesc(axL2, A.tf, A.freqs, A.Sdb); axis(axL2, 'xy'); hold(axL2, 'on');
-        mx = max(A.Sdb(:)); caxis(axL2, [mx-70 mx]);
-        plot(axL2, A.tf, A.formTrack(:,1), 'w.'); plot(axL2, A.tf, A.formTrack(:,2), 'm.');
-        plot(axL2, A.tf, A.formTrack(:,3), 'y.'); ylim(axL2, [0 5500]);
-        xlabel(axL2, 'Time (s)'); ylabel(axL2, 'Hz'); title(axL2, 'Live spectrogram + formants');
-        cla(axL3); plot(axL3, A.tf, A.f0track, 'b.', 'MarkerSize', 10); grid(axL3, 'on');
-        ylim(axL3, [50 450]); xlabel(axL3, 'Time (s)'); ylabel(axL3, 'F0 (Hz)');
-        title(axL3, sprintf('Live pitch: %.0f Hz   formants F1 %.0f | F2 %.0f | F3 %.0f', A.voice(1), A.form(1), A.form(2), A.form(3)));
-        cla(axL4);
-        if isempty(model)
-            axis(axL4, 'off'); title(axL4, 'Enroll 2+ samples to see the live match score');
-        else
-            sc = scoreTest(A, model, enr);
-            liveHist(end+1) = sc.fused; %#ok<AGROW>
-            liveHist = liveHist(max(1, end-39):end);
-            sm = mean(liveHist(max(1, end-2):end));
-            okL = sm <= P.zThr && sc.z(1) <= 2 * P.zThr;
-            plot(axL4, liveHist, 'k-o', 'LineWidth', 1.5); hold(axL4, 'on');
-            plot(axL4, [1 max(2, numel(liveHist))], [P.zThr P.zThr], 'r--', 'LineWidth', 2);
-            grid(axL4, 'on'); xlabel(axL4, 'update'); ylabel(axL4, 'fused z-score');
-            title(axL4, sprintf('LIVE: %s   (z = %.2f, threshold %.1f)', ternary(okL, 'MATCH', 'NO MATCH'), sm, P.zThr), ...
-                  'Color', ternaryC(okL), 'FontSize', 13);
-        end
-        drawnow limitrate;
-    end
-
     function onClose(~, ~)
         try
             if ~isempty(tmr), stop(tmr); delete(tmr); end
             if ~isempty(rec), stop(rec); end
         catch
         end
-        stopLive(true);
         delete(fig);
     end
 end
@@ -865,54 +660,6 @@ function sc = scoreTest(A, model, enr)
     sc.fused = sum(model.w(valid) .* z(valid)) / sum(model.w(valid));
     sc.D = D;  sc.dm = dm;  sc.z = z;
     [~, sc.best] = min(D(:, 1));
-end
-
-%% ---------------------- voice changer (phase vocoder) -------------------
-function y = pitchShift(x, a)
-% Pitch shift by factor a (a>1 = higher) = time-stretch then resample
-    [ys, aeff] = pvStretch(x(:), a);
-    t = 1 : aeff : numel(ys);
-    y = interp1(1:numel(ys), ys, t, 'linear')';
-    y = y(:);
-end
-
-function [y, aeff] = pvStretch(x, a)
-    N = 1024;  Ha = 256;  Hs = round(a * Ha);  aeff = Hs / Ha;
-    w = 0.5 - 0.5 * cos(2*pi*(0:N-1)' / N);
-    nFr = floor((numel(x) - N) / Ha) + 1;
-    omega = 2*pi*Ha*(0:N/2)' / N;
-    y = zeros(Hs*(nFr-1) + N, 1);  wsum = zeros(size(y));
-    prevPh = zeros(N/2+1, 1);  phAcc = zeros(N/2+1, 1);
-    for m = 1:nFr
-        seg = x((m-1)*Ha + (1:N)) .* w;
-        X = fft(seg);  X = X(1:N/2+1);
-        mag = abs(X);  ph = angle(X);
-        if m == 1
-            phAcc = ph;
-        else
-            dphi = ph - prevPh - omega;
-            dphi = dphi - 2*pi*round(dphi / (2*pi));
-            phAcc = phAcc + (omega + dphi) * (Hs / Ha);
-        end
-        prevPh = ph;
-        Y = mag .* exp(1j * phAcc);
-        fr = real(ifft([Y; conj(Y(end-1:-1:2))])) .* w;
-        ix = (m-1)*Hs + (1:N);
-        y(ix) = y(ix) + fr;
-        wsum(ix) = wsum(ix) + w.^2;
-    end
-    y = y ./ max(wsum, 1e-3);
-end
-
-function [S, t, f] = quickSpec(x, Fs)
-    x = x(:);  N = 512;  H = 160;
-    nF = 1 + floor((numel(x) - N) / H);
-    idx = (1:N)' + (0:nF-1) * H;
-    w = 0.54 - 0.46 * cos(2*pi*(0:N-1)' / (N-1));
-    X = fft(x(idx) .* w);
-    S = 10*log10(abs(X(1:N/2+1, :)).^2 + eps);
-    t = ((0:nF-1) * H + N/2) / Fs;
-    f = (0:N/2) * Fs / N;
 end
 
 %% ---------------------- Mel filter bank & DCT ---------------------------
