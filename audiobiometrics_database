@@ -1,0 +1,1071 @@
+function audio_biometrics()
+% AUDIO_BIOMETRICS  Speaker verification + identification with a named speaker database.
+%
+%   Workflow
+%     1. "+ New speaker"  -> type a name (e.g. Ravi)
+%     2. STEP 1: record / load 2 to 5 samples of the SAME phrase for that speaker
+%     3. STEP 2: record / load the voice you want to test
+%     4. STEP 3: VERIFY  (is it the selected speaker?)  or
+%                IDENTIFY (who is it? searches every speaker in the database)
+%
+%   The database is saved automatically to speaker_db.mat next to this file.
+
+    P.Fs = 16000;   P.frameMs = 25;   P.stepMs = 10;   P.alpha = 0.97;
+    P.nFilt = 26;   P.nCoef = 13;     P.NFFT = 512;
+    P.maxSec  = 12;
+    P.denoise = true;
+    P.rasta   = false;
+    P.zThr    = 1.0;
+    P.fbank   = melFilterBank(P.nFilt, P.NFFT, P.Fs);
+    P.dctMat  = dctMatrix(P.nFilt, P.nCoef);
+    Fs = P.Fs;
+
+    dbFile = fullfile(dbFolder(), 'speaker_db.mat');
+    db = repmat(newSpeaker(''), 0, 1);      % speaker database (struct array)
+    testSig = [];  testName = '';
+    rec = [];  tmr = [];  recMode = '';  t0 = [];  recSpk = 0;
+    BG = [0.97 0.97 0.98];
+
+    fig = figure('Name', 'Audio Biometrics', 'NumberTitle', 'off', ...
+        'MenuBar', 'none', 'ToolBar', 'none', 'Color', BG, ...
+        'Position', [80 30 1180 780], 'CloseRequestFcn', @onClose);
+
+    % ---------------- title + STOP ----------------
+    uicontrol(fig, 'Style', 'text', 'FontSize', 16, 'FontWeight', 'bold', ...
+        'String', 'Audio Biometrics  -  speaker verification and identification', ...
+        'HorizontalAlignment', 'left', 'BackgroundColor', BG, ...
+        'ForegroundColor', [0.10 0.20 0.45], 'Position', [15 745 900 30]);
+    btnStop = mkBtn(fig, 'STOP RECORDING', [1000 742 165 34], @(~,~) stopRec());
+    set(btnStop, 'Enable', 'off', 'ForegroundColor', [0.8 0 0], 'FontWeight', 'bold', ...
+        'BackgroundColor', [1 0.85 0.85]);
+
+    % ---------------- left: speaker database ----------------
+    pSpk = mkPanel('Speaker database', [15 90 330 645]);
+    lbSpk = uicontrol(pSpk, 'Style', 'listbox', 'FontSize', 12, 'String', {' '}, ...
+        'Position', [10 165 308 440], 'Callback', @(~,~) onSelect(), ...
+        'TooltipString', 'Click a speaker to select it for enrollment and verification');
+    btnAddSpk = mkBtn(pSpk, '+ New speaker', [10 118 100 36], @(~,~) addSpeakerDlg());
+    btnRenSpk = mkBtn(pSpk, 'Rename',        [115 118 95 36], @(~,~) renameSpk());
+    btnDelSpk = mkBtn(pSpk, 'Delete',        [215 118 93 36], @(~,~) deleteSpk());
+    txtSpkInfo = mkTxt(pSpk, [10 8 298 100], '');
+
+    % ---------------- right: waveform ----------------
+    axWave = axes('Parent', fig, 'Units', 'pixels', 'Position', [410 625 745 95]);
+    hLine = plot(axWave, 0, 0, 'b'); grid(axWave, 'on');
+    ylim(axWave, [-1 1]); xlabel(axWave, 'Time (s)'); ylabel(axWave, 'Amplitude');
+    title(axWave, 'Waveform (shows live while recording)');
+
+    % ---------------- step 1: enroll ----------------
+    pEnr = mkPanel('STEP 1   Enroll the selected speaker  (2 to 5 samples of the SAME short phrase)', [360 495 805 90]);
+    btnRecEnr  = mkBtn(pEnr, 'Record sample',          [15 15 190 40], @(~,~) startRec('enroll'));
+    btnLoadEnr = mkBtn(pEnr, 'Load file(s)...',        [215 15 190 40], @(~,~) loadEnroll());
+    btnClrEnr  = mkBtn(pEnr, 'Clear this speaker''s samples', [415 15 190 40], @(~,~) clearEnroll());
+    mkTxt(pEnr, [615 8 180 50], 'Samples are saved to the database automatically.');
+
+    % ---------------- step 2: test ----------------
+    pTest = mkPanel('STEP 2   Provide the voice to test', [360 395 805 90]);
+    btnRecTest  = mkBtn(pTest, 'Record test voice', [15 15 190 40], @(~,~) startRec('test'));
+    btnLoadTest = mkBtn(pTest, 'Load test file...', [215 15 190 40], @(~,~) loadTest());
+    txtTest = mkTxt(pTest, [415 8 380 50], 'Test voice: not provided yet');
+
+    % ---------------- step 3: decide ----------------
+    pVer = mkPanel('STEP 3   Decide', [360 285 805 100]);
+    btnVerify = mkBtn(pVer, 'VERIFY :  is it the selected speaker?', [15 32 385 40], @(~,~) verify());
+    set(btnVerify, 'FontSize', 13, 'FontWeight', 'bold', 'BackgroundColor', [0.80 0.92 0.82], ...
+        'TooltipString', '1:1 check against the speaker selected in the database');
+    btnIdent = mkBtn(pVer, 'IDENTIFY :  who is it?  (search database)', [410 32 385 40], @(~,~) identify());
+    set(btnIdent, 'FontSize', 13, 'FontWeight', 'bold', 'BackgroundColor', [0.80 0.88 0.97], ...
+        'TooltipString', '1:N search: compares the test voice with every enrolled speaker');
+    chkDen = uicontrol(pVer, 'Style', 'checkbox', 'String', 'Noise reduction', 'Value', 1, ...
+        'FontSize', 11, 'BackgroundColor', BG, 'Position', [15 4 170 24], 'Callback', @(~,~) onOpt());
+    chkRasta = uicontrol(pVer, 'Style', 'checkbox', 'String', 'RASTA filter', 'Value', 0, ...
+        'FontSize', 11, 'BackgroundColor', BG, 'Position', [195 4 150 24], 'Callback', @(~,~) onOpt());
+    chkDash = uicontrol(pVer, 'Style', 'checkbox', 'String', 'Show analysis dashboard', 'Value', 1, ...
+        'FontSize', 11, 'BackgroundColor', BG, 'Position', [355 4 260 24]);
+
+    % ---------------- result ----------------
+    pRes = mkPanel('Result', [360 90 805 185]);
+    txtResult = uicontrol(pRes, 'Style', 'text', 'FontSize', 15, 'FontWeight', 'bold', ...
+        'Position', [10 100 785 62], 'String', 'Result will appear here', ...
+        'ForegroundColor', [0.3 0.3 0.3], 'BackgroundColor', [0.90 0.90 0.92]);
+    lbRank = uicontrol(pRes, 'Style', 'listbox', 'FontName', 'FixedWidth', 'FontSize', 9, ...
+        'Min', 0, 'Max', 2, 'Value', [], 'String', {' '}, 'Position', [10 8 785 88]);
+
+    % ---------------- footer ----------------
+    txtGuide = uicontrol(fig, 'Style', 'text', 'FontSize', 12, 'FontWeight', 'bold', ...
+        'HorizontalAlignment', 'left', 'BackgroundColor', BG, 'ForegroundColor', [0.05 0.25 0.60], ...
+        'Position', [15 50 1150 26], 'String', '');
+    uicontrol(fig, 'Style', 'text', 'FontSize', 9, 'HorizontalAlignment', 'left', ...
+        'BackgroundColor', BG, 'ForegroundColor', [0.35 0.35 0.35], 'Position', [15 6 1150 40], ...
+        'String', ['TIPS: say the same short phrase every time (3 to 5 s), use the same microphone, ' ...
+                   'in a quiet room.  Enroll 3 to 5 samples per person.   Database file: ' dbFile]);
+
+    allCtl = [lbSpk btnAddSpk btnRenSpk btnDelSpk btnRecEnr btnLoadEnr btnClrEnr ...
+              btnRecTest btnLoadTest btnVerify btnIdent chkDen chkRasta chkDash];
+
+    loadDB();
+    refreshList(1);
+    refreshStatus();
+
+    % =====================================================================
+    %  UI helpers
+    % =====================================================================
+    function b = mkBtn(par, label, pos, cb)
+        b = uicontrol(par, 'Style', 'pushbutton', 'String', label, ...
+            'FontSize', 11, 'Position', pos, 'Callback', cb);
+    end
+
+    function t = mkTxt(par, pos, str)
+        t = uicontrol(par, 'Style', 'text', 'FontSize', 11, 'BackgroundColor', BG, ...
+            'HorizontalAlignment', 'left', 'Position', pos, 'String', str);
+    end
+
+    function p = mkPanel(ttl, pos)
+        p = uipanel(fig, 'Title', ttl, 'FontSize', 11, 'FontWeight', 'bold', ...
+            'Units', 'pixels', 'Position', pos, 'BackgroundColor', BG);
+    end
+
+    function setIdle(isIdle)
+        s = 'off'; if isIdle, s = 'on'; end
+        set(allCtl, 'Enable', s);
+        if isIdle, set(btnStop, 'Enable', 'off'); else, set(btnStop, 'Enable', 'on'); end
+    end
+
+    function setBusy(tf)
+        if ~ishandle(fig), return; end
+        if tf, set(fig, 'Pointer', 'watch'); else, set(fig, 'Pointer', 'arrow'); end
+        drawnow;
+    end
+
+    function setResult(lines, state)
+        switch state
+            case 'ok',   fg = [1 1 1];       bgc = [0.10 0.60 0.20];
+            case 'bad',  fg = [1 1 1];       bgc = [0.78 0.12 0.12];
+            case 'warn', fg = [1 1 1];       bgc = [0.85 0.50 0.10];
+            case 'busy', fg = [0.2 0.2 0.2]; bgc = [1.00 0.95 0.70];
+            otherwise,   fg = [0.3 0.3 0.3]; bgc = [0.90 0.90 0.92];
+        end
+        set(txtResult, 'String', lines, 'ForegroundColor', fg, 'BackgroundColor', bgc);
+        drawnow;
+    end
+
+    function setRank(lines)
+        set(lbRank, 'String', lines, 'Value', [], 'ListboxTop', 1);
+    end
+
+    function updateGuide()
+        ix = curIdx();
+        if ix == 0
+            msg = 'NEXT STEP:  click "+ New speaker" and type the person''s name.';
+        elseif numel(db(ix).sigs) < 2
+            msg = sprintf('NEXT STEP:  enroll %d more sample(s) for "%s" - record or load them (Step 1).', ...
+                          2 - numel(db(ix).sigs), db(ix).name);
+        elseif isempty(testSig)
+            msg = 'NEXT STEP:  provide the test voice (Step 2).';
+        else
+            msg = sprintf('READY:  press VERIFY (is it "%s"?) or IDENTIFY (who is it?).', db(ix).name);
+        end
+        set(txtGuide, 'String', msg);
+    end
+
+    function refreshList(keepIdx)
+        if isempty(db)
+            set(lbSpk, 'String', {'(no speakers yet - click "+ New speaker")'}, 'Value', 1);
+            return;
+        end
+        items = cell(numel(db), 1);
+        for q = 1:numel(db)
+            n = numel(db(q).sigs);
+            if n >= 2, tag = sprintf('%d samples', n); else, tag = sprintf('%d sample - needs 2+', n); end
+            items{q} = sprintf('%s   (%s)', db(q).name, tag);
+        end
+        set(lbSpk, 'String', items, 'Value', min(max(keepIdx, 1), numel(db)));
+    end
+
+    function refreshStatus()
+        ix = curIdx();
+        if ix == 0
+            set(txtSpkInfo, 'ForegroundColor', 'k', 'String', ...
+                {'No speaker selected.', 'Add people to the database with "+ New speaker".'});
+            updateGuide();  return;
+        end
+        n = numel(db(ix).sigs);
+        L = {sprintf('Name: %s', db(ix).name), sprintf('Enrollment samples: %d', n)};
+        if n > 0, L{end+1} = ['Files: ' strjoin(db(ix).sigNames, ', ')]; end
+        fg = 'k';
+        if n < 2
+            L{end+1} = 'Add at least 2 samples to calibrate the threshold.';
+        elseif isempty(db(ix).model)
+            L{end+1} = 'Calibration pending ...';
+        elseif db(ix).model.warn
+            fg = [0.8 0 0];
+            L{end+1} = 'WARNING: samples differ a lot. Re-record with the SAME phrase and mic.';
+        else
+            L{end+1} = sprintf('Calibrated OK (%d pair(s)). Accept if fused z <= %.1f and DTW z <= %.1f', ...
+                               size(db(ix).model.pairD, 1), P.zThr, 2*P.zThr);
+        end
+        L{end+1} = sprintf('Noise reduction: %s    RASTA: %s', ternary(P.denoise, 'on', 'off'), ternary(P.rasta, 'on', 'off'));
+        set(txtSpkInfo, 'ForegroundColor', fg, 'String', L);
+        updateGuide();
+    end
+
+    function ix = curIdx()
+        if isempty(db), ix = 0; else, ix = min(max(get(lbSpk, 'Value'), 1), numel(db)); end
+    end
+
+    % =====================================================================
+    %  Database
+    % =====================================================================
+    function saveDB()
+        try
+            dbSave = repmat(struct('name', '', 'sigs', {{}}, 'sigNames', {{}}, 'created', ''), 0, 1);
+            for q = 1:numel(db)
+                dbSave(q).name     = db(q).name;
+                dbSave(q).sigs     = db(q).sigs;
+                dbSave(q).sigNames = db(q).sigNames;
+                dbSave(q).created  = db(q).created;
+            end
+            save(dbFile, 'dbSave');
+        catch ME
+            warndlg(['Could not save the database: ' ME.message], 'Database');
+        end
+    end
+
+    function loadDB()
+        if exist(dbFile, 'file') ~= 2, return; end
+        try
+            Ld = load(dbFile, 'dbSave');
+            for q = 1:numel(Ld.dbSave)
+                s = newSpeaker(Ld.dbSave(q).name);
+                s.sigs     = Ld.dbSave(q).sigs;
+                s.sigNames = Ld.dbSave(q).sigNames;
+                s.created  = Ld.dbSave(q).created;
+                db(end+1, 1) = s;
+            end
+        catch ME
+            warndlg(['Could not read the saved database: ' ME.message], 'Database');
+        end
+    end
+
+    function okk = validName(nm, selfIx)
+        okk = false;
+        if isempty(nm), warndlg('The name cannot be empty.', 'Speaker name'); return; end
+        for q = 1:numel(db)
+            if q ~= selfIx && strcmpi(db(q).name, nm)
+                warndlg(sprintf('A speaker called "%s" already exists.', nm), 'Speaker name'); return;
+            end
+        end
+        okk = true;
+    end
+
+    function ix = addSpeakerDlg()
+        ix = 0;
+        a = inputdlg('Enter the speaker''s name:', 'New speaker', [1 40]);
+        if isempty(a), return; end
+        nm = strtrim(a{1});  nm = nm(1:min(end, 30));
+        if ~validName(nm, 0), return; end
+        db(end+1, 1) = newSpeaker(nm);
+        saveDB();  refreshList(numel(db));  ix = numel(db);
+        setResult({'Result will appear here'}, 'idle');  setRank({' '});
+        refreshStatus();
+    end
+
+    function renameSpk()
+        ix = curIdx();
+        if ix == 0, return; end
+        a = inputdlg('New name:', 'Rename speaker', [1 40], {db(ix).name});
+        if isempty(a), return; end
+        nm = strtrim(a{1});  nm = nm(1:min(end, 30));
+        if ~validName(nm, ix), return; end
+        db(ix).name = nm;
+        saveDB();  refreshList(ix);  refreshStatus();
+    end
+
+    function deleteSpk()
+        ix = curIdx();
+        if ix == 0, return; end
+        c = questdlg(sprintf('Delete speaker "%s" and all %d enrollment sample(s)?', ...
+                     db(ix).name, numel(db(ix).sigs)), 'Delete speaker', 'Delete', 'Cancel', 'Cancel');
+        if ~strcmp(c, 'Delete'), return; end
+        db(ix) = [];
+        saveDB();  refreshList(min(ix, numel(db)));  onSelect();
+    end
+
+    function clearEnroll()
+        ix = curIdx();
+        if ix == 0, return; end
+        if isempty(db(ix).sigs), return; end
+        c = questdlg(sprintf('Remove all %d sample(s) of "%s"? (the name stays in the database)', ...
+                     numel(db(ix).sigs), db(ix).name), 'Clear samples', 'Clear', 'Cancel', 'Cancel');
+        if ~strcmp(c, 'Clear'), return; end
+        db(ix).sigs = {};  db(ix).sigNames = {};  db(ix).enr = {};  db(ix).model = [];  db(ix).dirty = true;
+        saveDB();  refreshList(ix);  refreshStatus();
+    end
+
+    function ix = requireSpeaker()
+        ix = curIdx();
+        if ix == 0, ix = addSpeakerDlg(); end
+    end
+
+    function onSelect()
+        ix = curIdx();
+        setResult({'Result will appear here'}, 'idle');  setRank({' '});
+        if ix > 0 && numel(db(ix).sigs) >= 2
+            setBusy(true);  ensureReady(ix);  setBusy(false);
+        end
+        refreshStatus();
+    end
+
+    function okk = ensureReady(ix)
+        % analyse the speaker's samples and calibrate its threshold (cached until something changes)
+        okk = true;
+        if ~db(ix).dirty, return; end
+        n = numel(db(ix).sigs);
+        setResult({sprintf('Analysing "%s"  (%d samples) ...', db(ix).name, n)}, 'busy');
+        try
+            E = cell(1, n);
+            for q = 1:n
+                Aq = analyzeVoice(double(db(ix).sigs{q}), P);
+                E{q} = struct('F', Aq.F, 'form', Aq.form, 'voice', Aq.voice, 'spec', Aq.spec, 'ltas', Aq.ltas);
+            end
+            db(ix).enr = E;
+            if n >= 2, db(ix).model = buildModel(E, P); else, db(ix).model = []; end
+            db(ix).dirty = false;
+        catch ME
+            okk = false;
+            errordlg(ME.message, ['Could not analyse ' db(ix).name]);
+        end
+        setResult({'Result will appear here'}, 'idle');
+    end
+
+    function okk = addEnroll(ix, x, name)
+        okk = false;
+        x = x(:);  x = x(1 : min(numel(x), round(P.maxSec * Fs)));
+        try
+            analyzeVoice(x, P);                       % validation only
+        catch ME
+            errordlg(ME.message, ['Enrollment error: ' name]);  return;
+        end
+        db(ix).sigs{end+1} = single(x);  db(ix).sigNames{end+1} = name;
+        db(ix).enr = {};  db(ix).model = [];  db(ix).dirty = true;
+        showWave(x, sprintf('Sample "%s" added to %s  (%.1f s)', name, db(ix).name, numel(x)/Fs), [0 0.55 0]);
+        okk = true;
+    end
+
+    function commitEnroll(ix)
+        saveDB();  refreshList(ix);
+        setBusy(true);  ensureReady(ix);  setBusy(false);
+        refreshStatus();
+    end
+
+    % =====================================================================
+    %  Recording / loading
+    % =====================================================================
+    function startRec(m)
+        if strcmp(m, 'enroll')
+            recSpk = requireSpeaker();
+            if recSpk == 0, return; end
+        end
+        recMode = m;
+        try
+            rec = audiorecorder(Fs, 16, 1);
+            record(rec);
+        catch ME
+            errordlg(['Cannot access the microphone: ' ME.message ...
+                '  Use the Load buttons instead.'], 'Microphone error');
+            return;
+        end
+        t0 = tic;  setIdle(false);
+        set(hLine, 'Color', [0.85 0 0]);
+        tmr = timer('ExecutionMode', 'fixedSpacing', 'Period', 0.15, ...
+                    'TimerFcn', @(~,~) updateLive());
+        start(tmr);
+    end
+
+    function updateLive()
+        if isempty(rec) || ~isvalid(fig), return; end
+        x = getaudiodata(rec);
+        if isempty(x), return; end
+        n = numel(x);  w = min(n, 5*Fs);  seg = x(end-w+1:end);
+        set(hLine, 'XData', ((n-w):(n-1))/Fs, 'YData', seg);
+        xlim(axWave, [(n-w)/Fs, max((n-w)/Fs + 5, n/Fs)]);
+        m = max(0.05, 1.1*max(abs(seg)));  ylim(axWave, [-m m]);
+        if strcmp(recMode, 'enroll') && recSpk > 0
+            who = sprintf('enrollment for %s', db(recSpk).name);
+        else
+            who = 'test voice';
+        end
+        title(axWave, sprintf('RECORDING %s ...  %.1f s     click STOP when finished', who, toc(t0)), ...
+              'Color', [0.85 0 0], 'Interpreter', 'none');
+        drawnow limitrate;
+    end
+
+    function stopRec()
+        if ~isempty(tmr), stop(tmr); delete(tmr); tmr = []; end
+        stop(rec);
+        x = getaudiodata(rec);
+        setIdle(true);
+        if numel(x) < 0.5*Fs
+            warndlg('Recording too short. Record at least 1 second.'); return;
+        end
+        if strcmp(recMode, 'enroll')
+            if addEnroll(recSpk, x, sprintf('rec#%d', numel(db(recSpk).sigs)+1)), commitEnroll(recSpk); end
+        else
+            setTest(x, 'recorded');
+        end
+    end
+
+    function filt = audioFilter()
+        filt = {'*.wav;*.mp3;*.m4a;*.mp4;*.aac;*.flac;*.ogg;*.opus;*.wma;*.amr;*.3gp;*.webm', ...
+                'All audio files'; '*.*', 'All files'};
+    end
+
+    function loadEnroll()
+        ix = requireSpeaker();
+        if ix == 0, return; end
+        [f, p] = uigetfile(audioFilter(), sprintf('Enrollment file(s) for %s (multi-select allowed)', db(ix).name), 'MultiSelect', 'on');
+        if isequal(f, 0), return; end
+        if ischar(f), f = {f}; end
+        added = false;
+        setBusy(true);
+        for q = 1:numel(f)
+            try
+                if addEnroll(ix, loadAudio(fullfile(p, f{q}), Fs), f{q}), added = true; end
+            catch ME
+                errordlg(ME.message, ['Could not read ' f{q}]);
+            end
+        end
+        setBusy(false);
+        if added, commitEnroll(ix); end
+    end
+
+    function loadTest()
+        [f, p] = uigetfile(audioFilter(), 'Select the TEST voice');
+        if isequal(f, 0), return; end
+        try
+            setTest(loadAudio(fullfile(p, f), Fs), f);
+        catch ME
+            errordlg(ME.message, 'Could not read file');
+        end
+    end
+
+    function showWave(x, ttl, col)
+        x = x(:);  dur = numel(x)/Fs;
+        set(hLine, 'XData', (0:numel(x)-1)/Fs, 'YData', x, 'Color', col);
+        xlim(axWave, [0 max(dur, 1)]);
+        m = max(0.05, 1.1*max(abs(x)));  ylim(axWave, [-m m]);
+        title(axWave, ttl, 'Color', col*0.8, 'Interpreter', 'none');
+    end
+
+    function setTest(x, name)
+        testSig = x(:);  testName = name;
+        showWave(testSig, sprintf('Test voice captured (%.1f s)', numel(testSig)/Fs), [0 0.4 0.8]);
+        set(txtTest, 'String', sprintf('Test voice:  %s  (%.1f s)  OK', name, numel(testSig)/Fs));
+        updateGuide();
+    end
+
+    function onOpt()
+        P.denoise = logical(get(chkDen, 'Value'));
+        P.rasta   = logical(get(chkRasta, 'Value'));
+        for q = 1:numel(db)                 % features must be recomputed with the new DSP settings
+            db(q).enr = {};  db(q).model = [];  db(q).dirty = true;
+        end
+        ix = curIdx();
+        if ix > 0 && numel(db(ix).sigs) >= 2
+            setBusy(true);  ensureReady(ix);  setBusy(false);
+        end
+        refreshStatus();
+    end
+
+    % =====================================================================
+    %  Verify (1:1)  and  Identify (1:N)
+    % =====================================================================
+    function verify()
+        ix = curIdx();
+        if ix == 0
+            warndlg('Create a speaker first (click "+ New speaker") and enroll 2 to 5 samples.', 'Verify'); return;
+        end
+        if numel(db(ix).sigs) < 2
+            warndlg(sprintf('"%s" has only %d sample(s). Enroll at least 2 (Step 1).', db(ix).name, numel(db(ix).sigs)), 'Verify'); return;
+        end
+        if isempty(testSig)
+            warndlg('Provide a test voice first (Step 2).', 'Verify'); return;
+        end
+        setBusy(true);  guard = onCleanup(@() setBusy(false));
+        if ~ensureReady(ix), return; end
+        setResult({'Analysing test voice ...'}, 'busy');
+        try
+            A  = analyzeVoice(testSig, P);
+            sc = scoreTest(A, db(ix).model, db(ix).enr);
+        catch ME
+            setResult({'Result will appear here'}, 'idle');
+            errordlg(ME.message, 'Processing error'); return;
+        end
+        ok   = isMatch(sc, P);
+        conf = 100 / (1 + exp(2.5*(sc.fused - P.zThr)));
+        nm   = db(ix).name;
+        if ok
+            setResult({sprintf('MATCH  -  this is %s', nm), ...
+                       sprintf('fused z = %.2f     DTW z = %.2f     confidence ~ %.0f %%', sc.fused, sc.z(1), conf)}, 'ok');
+        else
+            setResult({sprintf('NO MATCH  -  this is NOT %s', nm), ...
+                       sprintf('fused z = %.2f     DTW z = %.2f     confidence ~ %.0f %%', sc.fused, sc.z(1), conf)}, 'bad');
+        end
+        setRank(featureLines(sc, db(ix).model, P));
+        printReport(nm, A, sc, db(ix).model, ok, conf, numel(db(ix).enr), P);
+        if get(chkDash, 'Value')
+            showDashboard(A, sc, ok, conf, db(ix).enr, db(ix).sigNames, nm);
+        end
+    end
+
+    function identify()
+        cand = find(arrayfun(@(s) numel(s.sigs) >= 2, db));
+        if isempty(cand)
+            warndlg('No speaker has 2 or more enrollment samples yet.', 'Identify'); return;
+        end
+        if isempty(testSig)
+            warndlg('Provide a test voice first (Step 2).', 'Identify'); return;
+        end
+        setBusy(true);  guard = onCleanup(@() setBusy(false));
+        try
+            A = analyzeVoice(testSig, P);
+        catch ME
+            errordlg(ME.message, 'Processing error'); return;
+        end
+        nC = numel(cand);
+        R = nan(nC, 1);  Z1 = nan(nC, 1);  okv = false(nC, 1);  SC = cell(nC, 1);
+        for q = 1:nC
+            ix = cand(q);
+            setResult({sprintf('Comparing with %s  (%d of %d) ...', db(ix).name, q, nC)}, 'busy');
+            if ~ensureReady(ix), continue; end
+            setResult({sprintf('Comparing with %s  (%d of %d) ...', db(ix).name, q, nC)}, 'busy');
+            try
+                SC{q}  = scoreTest(A, db(ix).model, db(ix).enr);
+                R(q)   = SC{q}.fused;  Z1(q) = SC{q}.z(1);  okv(q) = isMatch(SC{q}, P);
+            catch
+            end
+        end
+        valid = find(~isnan(R));
+        if isempty(valid)
+            setResult({'Could not score any speaker'}, 'idle'); return;
+        end
+        [~, ord] = sort(R(valid));  ord = valid(ord);
+        mIdx = find(okv);
+        if ~isempty(mIdx)
+            [~, mm] = min(R(mIdx));  best = mIdx(mm);  identified = true;
+        else
+            best = ord(1);  identified = false;
+        end
+        bi   = cand(best);  nm = db(bi).name;
+        conf = 100 / (1 + exp(2.5*(R(best) - P.zThr)));
+        others = setdiff(mIdx, best);
+        tight  = ~isempty(others) && (min(R(others)) - R(best)) < 0.25;
+
+        if identified && ~tight
+            setResult({sprintf('IDENTIFIED  -  %s', nm), ...
+                       sprintf('fused z = %.2f     confidence ~ %.0f %%', R(best), conf)}, 'ok');
+        elseif identified
+            setResult({sprintf('PROBABLY  %s  -  but another speaker is very close', nm), ...
+                       'Record a longer / cleaner test sample to be sure.'}, 'warn');
+        else
+            setResult({'UNKNOWN SPEAKER  -  nobody in the database matches', ...
+                       sprintf('closest was %s   (fused z = %.2f)', nm, R(best))}, 'warn');
+        end
+
+        lines = cell(numel(ord) + 1, 1);
+        lines{1} = 'Rank  Speaker             fused z   DTW z   verdict';
+        for r = 1:numel(ord)
+            k = ord(r);  tag = 'no';
+            if okv(k), tag = 'MATCH'; end
+            lines{r+1} = sprintf('%2d.   %-17s %8.2f %7.2f   %s', r, shortName(db(cand(k)).name, 17), R(k), Z1(k), tag);
+        end
+        setRank(lines);
+        fprintf('\n================ IDENTIFICATION REPORT ================\n');
+        fprintf('%s\n', lines{:});
+        fprintf('Decision: %s\n=======================================================\n', ...
+                ternary(identified, ['IDENTIFIED as ' nm], 'UNKNOWN speaker'));
+
+        if get(chkDash, 'Value')
+            showDashboard(A, SC{best}, identified, conf, db(bi).enr, db(bi).sigNames, nm);
+        end
+    end
+
+    % =====================================================================
+    %  Dashboard
+    % =====================================================================
+    function showDashboard(A, sc, ok, conf, E, Enames, spkName)
+        f2 = figure(901); clf(f2);
+        set(f2, 'Name', 'Verification Dashboard', 'NumberTitle', 'off', 'Position', [40 30 1380 820]);
+        colormap(f2, 'jet');
+        t = (0:numel(A.x)-1)/Fs;
+
+        subplot(3,3,1);
+        plot(t, A.x, 'b'); hold on; stairs(A.tf, double(A.vad)*0.9, 'r', 'LineWidth', 1.2);
+        grid on; xlabel('Time (s)'); ylabel('Amplitude');
+        title('1. Denoised waveform + speech detection (red)');
+
+        subplot(3,3,2);
+        imagesc(A.tf, A.freqs, A.Sdb); axis xy; hold on;
+        mx = max(A.Sdb(:)); caxis([mx-70 mx]);
+        plot(A.tf, A.formTrack(:,1), 'w.', 'MarkerSize', 6);
+        plot(A.tf, A.formTrack(:,2), 'm.', 'MarkerSize', 6);
+        plot(A.tf, A.formTrack(:,3), 'y.', 'MarkerSize', 6);
+        ylim([0 5500]); xlabel('Time (s)'); ylabel('Frequency (Hz)');
+        title('2. Spectrogram + LPC formants F1(w) F2(m) F3(y)');
+
+        subplot(3,3,3);
+        plot(A.tf, A.f0track, 'b.'); hold on; grid on;
+        v = cellfun(@(e) e.voice(1), E);  f0e = median(v(~isnan(v)));
+        if ~isnan(f0e), plot([A.tf(1) A.tf(end)], [f0e f0e], 'r--', 'LineWidth', 1.5); end
+        ylim([50 450]); xlabel('Time (s)'); ylabel('F0 (Hz)');
+        title(sprintf('3. Pitch (autocorr.): test %.0f Hz | enroll %.0f Hz', A.voice(1), f0e));
+
+        subplot(3,3,4);
+        imagesc(A.M'); axis xy; colorbar;
+        xlabel('Speech frame'); ylabel('MFCC c1..c12');
+        title('4. MFCC heat-map (c1..c12)');
+
+        subplot(3,3,5);
+        [~, Dm, path] = dtwDist(A.F, E{sc.best}.F);
+        imagesc(Dm); axis xy; hold on;
+        plot(path(:,2), path(:,1), 'w', 'LineWidth', 2);
+        xlabel(sprintf('enrollment "%s" frame (/2)', Enames{sc.best}), 'Interpreter', 'none');
+        ylabel('test frame (/2)');
+        title('5. DTW cost matrix + optimal alignment path');
+
+        subplot(3,3,6);
+        z = sc.z;  z(isnan(z)) = 0;
+        bar(1:4, z, 'FaceColor', [0.2 0.5 0.9]); hold on;
+        bar(5, sc.fused, 'FaceColor', ternaryC(ok));
+        plot([0 6], [P.zThr P.zThr], 'k--', 'LineWidth', 2); grid on; xlim([0 6]);
+        set(gca, 'XTick', 1:5, 'XTickLabel', {'DTW', 'Form.', 'Voice', 'Spec.', 'FUSED'});
+        ylabel('z-score (lower = more similar)');
+        title('6. Per-feature z-scores | dashed = threshold');
+
+        subplot(3,3,7);
+        L = mean(cell2mat(cellfun(@(e) e.ltas, E, 'UniformOutput', false)), 2);
+        plot(A.freqs, L, 'b', 'LineWidth', 1.5); hold on;
+        plot(A.freqs, A.ltas, 'r', 'LineWidth', 1.5); grid on;
+        xlabel('Frequency (Hz)'); ylabel('dB'); legend('Enrollment', 'Test');
+        title('7. Long-term average spectrum');
+
+        subplot(3,3,8);
+        Fe = nan(numel(E), 3);
+        for i = 1:numel(E), Fe(i,:) = E{i}.form(1:3); end
+        bar([mean(Fe, 1, 'omitnan'); A.form(1:3)]'); grid on;
+        set(gca, 'XTickLabel', {'F1', 'F2', 'F3'}); ylabel('Hz'); legend('Enrollment', 'Test');
+        title('8. Vocal-tract resonances (formants)');
+
+        subplot(3,3,9);
+        cla; axis([0 1 0 1]); axis off;
+        rectangle('Position', [0 0 1 1], 'FaceColor', ternaryC(ok), 'EdgeColor', 'none');
+        if ok, vtxt = 'MATCH'; else, vtxt = 'NO MATCH'; end
+        text(0.5, 0.88, vtxt, 'Color', 'w', 'FontSize', 20, 'FontWeight', 'bold', 'HorizontalAlignment', 'center');
+        text(0.5, 0.74, sprintf('Speaker: %s', spkName), 'Color', 'w', 'FontSize', 14, 'FontWeight', 'bold', 'HorizontalAlignment', 'center', 'Interpreter', 'none');
+        text(0.5, 0.58, sprintf('Fused z = %.2f   (threshold %.1f)', sc.fused, P.zThr), 'Color', 'w', 'FontSize', 13, 'HorizontalAlignment', 'center');
+        text(0.5, 0.44, sprintf('Confidence (heuristic): %.0f %%', conf), 'Color', 'w', 'FontSize', 13, 'HorizontalAlignment', 'center');
+        text(0.5, 0.30, sprintf('z: DTW %.1f | Form %.1f | Voice %.1f | Spec %.1f', z), 'Color', 'w', 'FontSize', 10, 'HorizontalAlignment', 'center');
+        text(0.5, 0.16, sprintf('jitter %.3f  shimmer %.3f  HNR %.1f dB', A.voice(2), A.voice(3), A.voice(4)-20), 'Color', 'w', 'FontSize', 10, 'HorizontalAlignment', 'center');
+    end
+
+    function onClose(~, ~)
+        try
+            if ~isempty(tmr), stop(tmr); delete(tmr); end
+            if ~isempty(rec), stop(rec); end
+        catch
+        end
+        delete(fig);
+    end
+end
+
+% =========================================================================
+%  Local functions
+% =========================================================================
+function d = dbFolder()
+    d = fileparts(mfilename('fullpath'));
+    if isempty(d), d = pwd; end
+end
+
+function s = newSpeaker(name)
+    s.name     = name;
+    s.sigs     = {};          % raw enrollment signals (single, 16 kHz)
+    s.sigNames = {};          % file names / rec#n
+    s.enr      = {};          % cached features (not saved)
+    s.model    = [];          % cached calibration (not saved)
+    s.dirty    = true;        % true -> features need (re)computing
+    s.created  = datestr(now, 'yyyy-mm-dd HH:MM');
+end
+
+function s = shortName(s, n)
+    if numel(s) > n, s = [s(1:n-1) '~']; end
+end
+
+function L = featureLines(sc, model, P)
+    names = {'DTW-MFCC', 'Formants', 'Voice quality', 'Spectral'};
+    L = cell(6, 1);
+    L{1} = 'Feature            distance   z-score   weight';
+    for q = 1:4
+        L{q+1} = sprintf('%-16s %9.3f %+9.2f %8.2f', names{q}, sc.dm(q), sc.z(q), model.w(q));
+    end
+    L{6} = sprintf('FUSED z = %.2f      accept if <= %.1f  (and DTW z <= %.1f)', sc.fused, P.zThr, 2*P.zThr);
+end
+
+function printReport(nm, A, sc, model, ok, conf, nEnr, P)
+    names = {'DTW-MFCC', 'Formants', 'Voice quality', 'Spectral'};
+    fprintf('\n================ VERIFICATION REPORT ================\n');
+    fprintf('Claimed speaker    : %s\n', nm);
+    fprintf('Enrollment samples : %d\n', nEnr);
+    for q = 1:4
+        fprintf('  %-14s distance %.3f   z-score %+.2f   weight %.2f\n', ...
+                names{q}, sc.dm(q), sc.z(q), model.w(q));
+    end
+    fprintf('Formants test (Hz) : F1 %.0f  F2 %.0f  F3 %.0f\n', A.form(1), A.form(2), A.form(3));
+    fprintf('Pitch / jitter / shimmer : %.1f Hz / %.3f / %.3f\n', A.voice(1), A.voice(2), A.voice(3));
+    fprintf('FUSED z-score      : %.3f   threshold %.1f   ->  %s\n', sc.fused, P.zThr, ternary(ok, 'MATCH', 'NO MATCH'));
+    fprintf('Confidence (heuristic) : %.1f %%\n', conf);
+    fprintf('=====================================================\n');
+end
+
+function out = ternary(c, a, b)
+    if c, out = a; else, out = b; end
+end
+
+function ok = isMatch(sc, P)
+    ok = sc.fused <= P.zThr && sc.z(1) <= 2 * P.zThr;
+end
+
+function c = ternaryC(ok)
+    if ok, c = [0.10 0.60 0.20]; else, c = [0.78 0.12 0.12]; end
+end
+
+% ------------------------- DSP / scoring (unchanged) -------------------------
+
+function A = analyzeVoice(x, P)
+    x = x(:);
+    x = x(1 : min(numel(x), round(P.maxSec * P.Fs)));
+    x = x - mean(x);
+    if max(abs(x)) < 1e-4
+        error('The recording is silent. Check microphone / file.');
+    end
+    x = x / (max(abs(x)) + eps);
+    if P.denoise
+        x = spectralSubtract(x, P.Fs);
+        x = x / (max(abs(x)) + eps);
+    end
+    y = [x(1); x(2:end) - P.alpha * x(1:end-1)];
+
+    frameLen = round(P.Fs * P.frameMs / 1000);
+    stepLen  = round(P.Fs * P.stepMs  / 1000);
+    nF = 1 + floor((numel(y) - frameLen) / stepLen);
+    if nF < 30, error('Recording too short (need about 0.5 s or more).'); end
+
+    idx = (1:frameLen)' + (0:nF-1) * stepLen;
+    w   = 0.54 - 0.46 * cos(2*pi*(0:frameLen-1)' / (frameLen-1));
+    Yw  = y(idx) .* w;
+
+    X  = fft(Yw, P.NFFT);
+    Pw = abs(X(1:P.NFFT/2+1, :)).^2;
+    E  = max(P.fbank * Pw, eps);
+    LE = log(E);
+    if P.rasta
+        LE = filter(0.1*[2 1 0 -1 -2], [1 -0.98], LE, [], 2);
+    end
+    C = P.dctMat * LE;
+
+    eDB = 10*log10(sum(Yw.^2, 1)' + eps);
+    s = sort(eDB);
+    noiseFloor = s(max(1, round(0.1*nF)));
+    hi         = s(max(1, round(0.9*nF)));
+    vad = eDB > noiseFloor + 0.3*(hi - noiseFloor);
+    vad = movmean(double(vad), 7) > 0.5;
+    if sum(vad) < 30, vad = eDB >= median(eDB); end
+    if sum(vad) < 30, error('Not enough speech detected.'); end
+
+    M = C(2:end, vad)';
+    M = M - mean(M, 1);              % CMN: mic/room colour hata do
+    A.F = [M deltaCalc(M, 2)];
+    A.M = M;
+
+    A.x = x;  A.vad = vad;
+    A.tf = ((0:nF-1) * stepLen + frameLen/2) / P.Fs;
+    A.freqs = (0:P.NFFT/2) * P.Fs / P.NFFT;
+    A.Sdb = 10*log10(Pw + eps);
+    A.ltas = mean(A.Sdb(:, vad), 2);
+
+    A.formTrack = formantTrack(Yw, vad, P);
+    okF = all(~isnan(A.formTrack), 2);
+    if sum(okF) >= 5
+        FT = A.formTrack(okF, :);
+        A.form = [median(FT, 1), std(FT, 0, 1)];
+    else
+        A.form = nan(1, 6);
+    end
+
+    [A.f0track, pk, amp, per] = pitchTrack(x, P, nF, stepLen, vad);
+    voiced = ~isnan(A.f0track);
+    if sum(voiced) >= 5
+        f0med = median(A.f0track(voiced));
+        dT = abs(per(2:end) - per(1:end-1));   dT = dT(~isnan(dT));
+        dA = abs(amp(2:end) - amp(1:end-1));   dA = dA(~isnan(dA));
+        if numel(dT) >= 3, jit = mean(dT) / mean(per(voiced)); else, jit = NaN; end
+        if numel(dA) >= 3, shi = mean(dA) / mean(amp(voiced)); else, shi = NaN; end
+        pkc = min(pk(voiced), 0.999);
+        hnr = mean(10*log10(pkc ./ (1 - pkc)));
+        A.voice = [f0med, jit, shi, hnr + 20];
+    else
+        A.voice = nan(1, 4);
+    end
+
+    Pk = Pw(:, vad);
+    f  = A.freqs(:);
+    cent = (f' * Pk) ./ (sum(Pk, 1) + eps);
+    cs   = cumsum(Pk, 1);
+    [~, ri] = max(cs >= 0.85 * cs(end, :), [], 1);
+    roll = A.freqs(ri);
+    Pn   = Pk ./ (sum(Pk, 1) + eps);
+    flux = sqrt(sum(diff(Pn, 1, 2).^2, 1));
+    flat = exp(mean(log(Pk + eps), 1)) ./ (mean(Pk, 1) + eps);
+    Xf   = x(idx(:, vad));
+    zcr  = sum(abs(diff(sign(Xf), 1, 1)), 1) / (2*frameLen);
+    A.spec = [mean(cent), mean(roll), mean(flat), mean(flux), mean(zcr), std(cent), std(roll)];
+end
+
+function y = spectralSubtract(x, Fs)
+    x = x(:);  L = numel(x);
+    N = 512;  H = 256;
+    nFr = max(1, ceil((L - N) / H) + 1);
+    Lp  = (nFr - 1) * H + N;
+    xp  = [x; zeros(Lp - L, 1)];
+    w   = sin(pi * ((0:N-1)' + 0.5) / N);
+    idx = (1:N)' + (0:nFr-1) * H;
+    X    = fft(xp(idx) .* w);
+    mag2 = abs(X).^2;   ph = angle(X);
+    [~, ord] = sort(sum(mag2, 1));
+    nn = ord(1 : min(nFr, max(3, round(0.1*nFr))));
+    Nm = mean(mag2(:, nn), 2);
+    G2 = max(mag2 - 2*Nm, 0.02*mag2);
+    Y  = sqrt(G2) .* exp(1j*ph);
+    fr = real(ifft(Y)) .* w;
+    y  = accumarray(idx(:), fr(:), [Lp 1]);
+    y  = y(1:L);
+end
+
+function D = deltaCalc(M, N)
+    T = size(M, 1);
+    Mp = [repmat(M(1,:), N, 1); M; repmat(M(end,:), N, 1)];
+    D = zeros(size(M));
+    for n = 1:N
+        D = D + n * (Mp((1:T)' + N + n, :) - Mp((1:T)' + N - n, :));
+    end
+    D = D / (2 * sum((1:N).^2));
+end
+
+function [f0, pk, amp, per] = pitchTrack(x, P, nF, stepLen, vad)
+    pl = round(0.04 * P.Fs);
+    f0 = nan(nF, 1);  pk = f0;  amp = f0;  per = f0;
+    lagMin = floor(P.Fs / 400);
+    lagMax = ceil(P.Fs / 70);
+    for k = 1:nF
+        if ~vad(k), continue; end
+        i0 = (k-1) * stepLen;
+        if i0 + pl > numel(x), break; end
+        seg = x(i0 + (1:pl));  seg = seg - mean(seg);
+        if sum(seg.^2) < 1e-6, continue; end
+        r = real(ifft(abs(fft(seg, 2*pl)).^2));
+        r = r(1:pl) / r(1);
+        [p1, ii] = max(r(lagMin+1 : lagMax+1));
+        L = lagMin + ii - 1;
+        Lh = round(L/2);
+        if Lh >= lagMin + 2
+            [p2, i2] = max(r(Lh-1 : Lh+3));
+            if p2 > 0.85 * p1, L = Lh - 3 + i2;  p1 = p2; end
+        end
+        if p1 > 0.35
+            r0 = r(L+1);  rm = r(L);  rp = r(L+2);
+            den = rm - 2*r0 + rp;  d = 0;
+            if den < 0, d = max(-1, min(1, 0.5*(rm - rp)/den)); end
+            Lr = L + d;
+            f0(k) = P.Fs / Lr;  per(k) = Lr;  pk(k) = p1;  amp(k) = sqrt(mean(seg.^2));
+        end
+    end
+end
+
+function form = formantTrack(Yw, vad, P)
+    nF = size(Yw, 2);
+    form = nan(nF, 3);
+    p = 16;
+    R = real(ifft(abs(fft(Yw(:, vad), 1024)).^2));
+    R = R(1:p+1, :);
+    kidx = find(vad);
+    for q = 1:numel(kidx)
+        r = R(:, q);
+        if r(1) < 1e-8, continue; end
+        r(1) = r(1) * 1.0001;
+        a = levinson(r, p);
+        rts = roots(a);
+        rts = rts(imag(rts) > 0.01);
+        if isempty(rts), continue; end
+        fr = angle(rts) * P.Fs / (2*pi);
+        bw = -log(max(abs(rts), 1e-6)) * P.Fs / pi;
+        ok = fr > 90 & fr < 5000 & bw < 400;
+        fr = sort(fr(ok));
+        if numel(fr) >= 3, form(kidx(q), :) = fr(1:3)'; end
+    end
+end
+
+function a = levinson(r, p)
+    a = zeros(1, p+1);  a(1) = 1;  e = r(1);
+    for i = 1:p
+        acc = r(i+1);
+        for j = 1:i-1, acc = acc + a(j+1) * r(i-j+1); end
+        k = -acc / e;
+        anew = a;
+        for j = 1:i-1, anew(j+1) = a(j+1) + k * a(i-j+1); end
+        anew(i+1) = k;  a = anew;
+        e = e * (1 - k^2);
+        if e <= 0, break; end
+    end
+end
+
+function [d, Dm, path] = dtwDist(A, B)
+    A = A(1:2:end, :);  B = B(1:2:end, :);
+    n = size(A, 1);  m = size(B, 1);
+    Dm = sqrt(max(sum(A.^2, 2) + sum(B.^2, 2)' - 2*(A*B'), 0));
+    Acc = inf(n+1, m+1);  Acc(1,1) = 0;
+    bw = max(round(0.25 * max(n, m)), abs(n - m) + 1);
+    for i = 1:n
+        c = i * m / n;
+        for j = max(1, floor(c) - bw) : min(m, ceil(c) + bw)
+            Acc(i+1, j+1) = Dm(i,j) + min(min(Acc(i, j+1), Acc(i+1, j)), Acc(i, j));
+        end
+    end
+    d = Acc(n+1, m+1) / (n + m);
+    path = [];
+    if nargout > 2
+        i = n;  j = m;  path = [i j];
+        while i > 1 || j > 1
+            if i == 1
+                j = j - 1;
+            elseif j == 1
+                i = i - 1;
+            else
+                [~, k] = min([Acc(i, j), Acc(i, j+1), Acc(i+1, j)]);
+                if k == 1, i = i-1; j = j-1; elseif k == 2, i = i-1; else, j = j-1; end
+            end
+            path(end+1, :) = [i j];
+        end
+    end
+end
+
+function d = relDist(a, b)
+    v = ~isnan(a) & ~isnan(b);
+    if ~any(v), d = NaN; return; end
+    r = abs(a(v) - b(v)) ./ ((abs(a(v)) + abs(b(v)))/2 + 1e-6);
+    d = sqrt(mean(min(r, 2).^2));
+end
+
+function d = voiceDist(a, b)
+    if any(isnan(a)) || any(isnan(b)), d = NaN; return; end
+    d0 = abs(log(a(1) / b(1)));                          % F0, log scale
+    dj = min(abs(a(2)-b(2)) / (a(2)+b(2)+1e-3), 1);      % jitter
+    ds = min(abs(a(3)-b(3)) / (a(3)+b(3)+1e-3), 1);      % shimmer
+    dh = min(abs(a(4)-b(4)) / 20, 1);                    % HNR (dB)
+    d = sqrt(0.6*d0^2 + 0.15*dj^2 + 0.15*ds^2 + 0.10*dh^2);
+end
+
+function d = featureDistances(A, B)
+    d = [dtwDist(A.F, B.F), relDist(A.form, B.form), voiceDist(A.voice, B.voice), relDist(A.spec, B.spec)];
+end
+
+function model = buildModel(enr, P)
+    n = numel(enr);  pairD = [];
+    Dm = nan(n, n, 4);
+    for i = 1:n-1
+        for j = i+1:n
+            d = featureDistances(enr{i}, enr{j});
+            pairD(end+1, :) = d;
+            Dm(i, j, :) = d;  Dm(j, i, :) = d;
+        end
+    end
+    loo = nan(n, 4);
+    for i = 1:n
+        loo(i, :) = squeeze(mean(Dm(i, [1:i-1, i+1:n], :), 2, 'omitnan'))';
+    end
+    mu = mean(loo, 1);
+    if n >= 3, sd = std(loo, 0, 1); else, sd = zeros(1, 4); end
+    sdEff = max(sd, 0.15 * abs(mu));
+    sdEff(sdEff < 1e-6 | isnan(sdEff)) = 1e-6;
+    w = [0.55 0.15 0.15 0.15];
+    bad = any(isnan(pairD), 1);
+    w(bad) = 0;  mu(bad) = 0;
+    model.pairD = pairD;  model.mu = mu;  model.sd = sdEff;  model.w = w;
+    model.warn = size(pairD, 1) > 1 && ~isnan(sd(1)) && sd(1) > 0.25 * abs(mu(1));
+end
+
+function sc = scoreTest(A, model, enr)
+    n = numel(enr);  D = zeros(n, 4);
+    for i = 1:n, D(i, :) = featureDistances(A, enr{i}); end
+    dm = mean(D, 1, 'omitnan');
+    z  = (dm - model.mu) ./ model.sd;
+    z(z < 0) = 0;                    % acha match bure match ko cancel na kare
+    valid = model.w > 0 & ~isnan(z);
+    if ~any(valid), error('No usable features in this recording.'); end
+    sc.fused = sum(model.w(valid) .* z(valid)) / sum(model.w(valid));
+    sc.D = D;  sc.dm = dm;  sc.z = z;
+    [~, sc.best] = min(D(:, 1));
+end
+
+function fb = melFilterBank(numFilters, NFFT, fs)
+    hz2mel = @(f) 2595 * log10(1 + f/700);
+    mel2hz = @(m) 700 * (10.^(m/2595) - 1);
+    melPts = linspace(hz2mel(0), hz2mel(fs/2), numFilters + 2);
+    bins   = floor((NFFT + 1) * mel2hz(melPts) / fs) + 1;
+    fb = zeros(numFilters, NFFT/2 + 1);
+    for m = 1:numFilters
+        l = bins(m); c = bins(m+1); r = bins(m+2);
+        for k = l:c, fb(m,k) = (k - l) / max(c - l, 1); end
+        for k = c:r, fb(m,k) = (r - k) / max(r - c, 1); end
+    end
+end
+
+function D = dctMatrix(N, K)
+    D = zeros(K, N);
+    for k = 0:K-1
+        for n = 0:N-1
+            D(k+1, n+1) = cos(pi * k * (n + 0.5) / N);
+        end
+    end
+    D = D * sqrt(2/N);
+    D(1,:) = D(1,:) / sqrt(2);
+end
+
+function sig = loadAudio(fname, Fs_target)
+    if exist(fname, 'file') ~= 2, error('File not found: %s', fname); end
+    try
+        [x, fs] = audioread(fname);
+    catch
+        [x, fs] = readWithFFmpeg(fname, Fs_target);
+    end
+    if size(x, 2) > 1, x = mean(x, 2); end
+    sig = resampleTo(x, fs, Fs_target);
+end
+
+function [x, fs] = readWithFFmpeg(fname, Fs_target)
+    [status, ~] = system('ffmpeg -version');
+    if status ~= 0
+        error(['MATLAB cannot read this file and FFmpeg is not installed. ' ...
+               'Install FFmpeg (ffmpeg.org) or convert the file to wav/mp3.']);
+    end
+    tmp = [tempname, '.wav'];
+    [status, msg] = system(sprintf('ffmpeg -y -loglevel error -i "%s" -ac 1 -ar %d "%s"', fname, Fs_target, tmp));
+    if status ~= 0 || exist(tmp, 'file') ~= 2, error('FFmpeg could not convert the file: %s', msg); end
+    [x, fs] = audioread(tmp);
+    delete(tmp);
+end
+
+function y = resampleTo(x, fs, fsTarget)
+    if fs == fsTarget, y = x(:); return; end
+    tOld = (0:numel(x)-1) / fs;
+    tNew = 0 : 1/fsTarget : tOld(end);
+    y = interp1(tOld, x, tNew, 'linear')';
+end
